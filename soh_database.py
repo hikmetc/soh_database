@@ -1068,6 +1068,8 @@ def page_data_download(data):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         for table_name, df in data.items():
+            if table_name.startswith('_'):
+                continue
             df.to_excel(writer, sheet_name=table_name, index=False)
 
     st.download_button(
