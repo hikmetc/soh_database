@@ -158,25 +158,34 @@ def wilson_ci(p, n, z=1.96):
     return (lower, upper)
 
 
-def calculate_all_cis(test_data):
+def calculate_all_cis(test_data, n_col='n_total'):
     """
     Calculate Wilson CIs for all SoH categories given test data.
 
     Parameters:
     -----------
     test_data : pd.Series or dict
-        Must contain 'n_total' and 'p1_pct' through 'p5_pct'
+        Must contain n_col and 'p1_pct' through 'p5_pct'
+    n_col : str
+        Column name for sample size (default 'n_total'; use 'n_raters_test' for per-study rows)
 
     Returns:
     --------
-    dict: CIs for each category {1: (lo, hi), 2: (lo, hi), ...}
+    dict: CIs for each category {1: (lo, hi), ..., 5: (lo, hi),
+          'p_geq4': (lo, hi), 'p_eq5': (lo, hi)}
     """
-    n = int(test_data['n_total'])
+    n = int(test_data[n_col])
     cis = {}
 
     for k in range(1, 6):
         p = test_data[f'p{k}_pct'] / 100  # Convert percentage to proportion
         cis[k] = wilson_ci(p, n)
+
+    # Derived composite proportions (compute from p4+p5 if columns absent)
+    p_geq4 = test_data['p_geq4'] if 'p_geq4' in test_data.index else (test_data['p4_pct'] + test_data['p5_pct'])
+    p_eq5  = test_data['p_eq5']  if 'p_eq5'  in test_data.index else test_data['p5_pct']
+    cis['p_geq4'] = wilson_ci(p_geq4 / 100, n)
+    cis['p_eq5']  = wilson_ci(p_eq5  / 100, n)
 
     return cis
 
@@ -477,25 +486,30 @@ def page_pooled_analysis(data):
         **Column Legend:**
         • **Crit/Cat Risk %** = P(SoH ≥ 4): Probability of Critical or Catastrophic harm
         • **Catastrophic %** = P(SoH = 5): Probability of Catastrophic harm only
+        • **95% CI** = Wilson score confidence interval shown as [lower–upper]
         """)
 
-        display_cols = [
-            'test_canonical', 'test_category', 'n_studies', 'n_total',
-            'p1_pct', 'p2_pct', 'p3_pct', 'p4_pct', 'p5_pct',
-            'mean_SoH', 'median_SoH', 'mode_SoH', 'p_geq4', 'p_eq5', 'pooling_status'
-        ]
-
-        display_df = pooled[display_cols].copy()
-        display_df.columns = [
-            'Test', 'Category', 'Studies', 'N Total',
-            '% Negligible', '% Minor', '% Serious', '% Critical', '% Catastrophic',
-            'Mean SoH', 'Median', 'Mode', 'Crit/Cat Risk %', 'Catastrophic %', 'Status'
-        ]
-
-        # Format numeric columns
-        for col in ['% Negligible', '% Minor', '% Serious', '% Critical', '% Catastrophic', 'Crit/Cat Risk %', 'Catastrophic %']:
-            display_df[col] = display_df[col].round(1)
-        display_df['Mean SoH'] = display_df['Mean SoH'].round(2)
+        table_rows = []
+        for _, row in pooled.iterrows():
+            row_cis = calculate_all_cis(row)
+            table_rows.append({
+                'Test': row['test_canonical'],
+                'Category': row['test_category'],
+                'Studies': int(row['n_studies']),
+                'N Total': int(row['n_total']),
+                'Negligible % (95% CI)':    f"{row['p1_pct']:.1f} [{row_cis[1][0]:.1f}–{row_cis[1][1]:.1f}]",
+                'Minor % (95% CI)':         f"{row['p2_pct']:.1f} [{row_cis[2][0]:.1f}–{row_cis[2][1]:.1f}]",
+                'Serious % (95% CI)':       f"{row['p3_pct']:.1f} [{row_cis[3][0]:.1f}–{row_cis[3][1]:.1f}]",
+                'Critical % (95% CI)':      f"{row['p4_pct']:.1f} [{row_cis[4][0]:.1f}–{row_cis[4][1]:.1f}]",
+                'Catastrophic % (95% CI)':  f"{row['p5_pct']:.1f} [{row_cis[5][0]:.1f}–{row_cis[5][1]:.1f}]",
+                'Mean SoH': round(row['mean_SoH'], 2),
+                'Median': int(row['median_SoH']),
+                'Mode': int(row['mode_SoH']),
+                'Crit/Cat Risk % (95% CI)': f"{row['p_geq4']:.1f} [{row_cis['p_geq4'][0]:.1f}–{row_cis['p_geq4'][1]:.1f}]",
+                'Catastrophic % (95% CI) ': f"{row['p_eq5']:.1f} [{row_cis['p_eq5'][0]:.1f}–{row_cis['p_eq5'][1]:.1f}]",
+                'Status': row['pooling_status'],
+            })
+        display_df = pd.DataFrame(table_rows)
 
         st.dataframe(display_df, use_container_width=True, hide_index=True)
 
@@ -540,6 +554,9 @@ def page_test_explorer(data):
 
     st.markdown("---")
 
+    # Pre-compute Wilson CIs (needed for metrics and distribution panel)
+    cis = calculate_all_cis(test_data)
+
     # Main metrics
     col1, col2, col3, col4 = st.columns(4)
 
@@ -558,17 +575,25 @@ def page_test_explorer(data):
         )
 
     with col3:
+        geq4_lo, geq4_hi = cis['p_geq4']
         st.metric(
             "Critical/Catastrophic Risk",
             f"{test_data['p_geq4']:.1f}%",
-            help="P(SoH ≥ 4): Probability that harm severity is Critical (level 4) or Catastrophic (level 5)"
+            help=(
+                f"P(SoH ≥ 4): Probability that harm severity is Critical (level 4) or Catastrophic (level 5)\n\n"
+                f"95% CI (Wilson): {geq4_lo:.1f}%–{geq4_hi:.1f}%"
+            )
         )
 
     with col4:
+        eq5_lo, eq5_hi = cis['p_eq5']
         st.metric(
             "Catastrophic Risk",
             f"{test_data['p_eq5']:.1f}%",
-            help="P(SoH = 5): Probability that harm severity is Catastrophic (level 5 - life-threatening/death)"
+            help=(
+                f"P(SoH = 5): Probability that harm severity is Catastrophic (level 5 - life-threatening/death)\n\n"
+                f"95% CI (Wilson): {eq5_lo:.1f}%–{eq5_hi:.1f}%"
+            )
         )
 
     st.markdown("---")
@@ -603,9 +628,6 @@ def page_test_explorer(data):
 
     with col2:
         st.subheader("Distribution with 95% CI")
-
-        # Calculate Wilson CIs for all categories
-        cis = calculate_all_cis(test_data)
 
         # Show all 5 categories with their CIs
         categories = list(get_harm_labels().values())
@@ -678,15 +700,23 @@ def page_test_explorer(data):
         # Table comparison
         st.subheader("Detailed Study Comparison")
 
-        comparison_df = study_data[['study_id', 'n_raters_test', 'p1_pct', 'p2_pct',
-                                     'p3_pct', 'p4_pct', 'p5_pct', 'mean_SoH']].copy()
-        comparison_df.columns = ['Study', 'N Raters', '% Negligible', '% Minor',
-                                  '% Serious', '% Critical', '% Catastrophic', 'Mean SoH']
-
-        for col in ['% Negligible', '% Minor', '% Serious', '% Critical', '% Catastrophic']:
-            comparison_df[col] = comparison_df[col].round(1)
-        comparison_df['Mean SoH'] = comparison_df['Mean SoH'].round(2)
-
+        comparison_rows = []
+        for _, row in study_data.iterrows():
+            row_cis = calculate_all_cis(row, n_col='n_raters_test')
+            comparison_rows.append({
+                'Study': row['study_id'],
+                'N Raters': int(row['n_raters_test']),
+                'Negligible % (95% CI)': f"{row['p1_pct']:.1f} [{row_cis[1][0]:.1f}–{row_cis[1][1]:.1f}]",
+                'Minor % (95% CI)':      f"{row['p2_pct']:.1f} [{row_cis[2][0]:.1f}–{row_cis[2][1]:.1f}]",
+                'Serious % (95% CI)':    f"{row['p3_pct']:.1f} [{row_cis[3][0]:.1f}–{row_cis[3][1]:.1f}]",
+                'Critical % (95% CI)':   f"{row['p4_pct']:.1f} [{row_cis[4][0]:.1f}–{row_cis[4][1]:.1f}]",
+                'Catastrophic % (95% CI)': f"{row['p5_pct']:.1f} [{row_cis[5][0]:.1f}–{row_cis[5][1]:.1f}]",
+                'Crit/Cat % (95% CI)':      f"{row.get('p_geq4', row['p4_pct'] + row['p5_pct']):.1f} [{row_cis['p_geq4'][0]:.1f}–{row_cis['p_geq4'][1]:.1f}]",
+                'Catastrophic % (95% CI) ': f"{row.get('p_eq5', row['p5_pct']):.1f} [{row_cis['p_eq5'][0]:.1f}–{row_cis['p_eq5'][1]:.1f}]",
+                'Mean SoH': round(row['mean_SoH'], 2),
+            })
+        comparison_df = pd.DataFrame(comparison_rows)
+        st.caption("95% CIs calculated using Wilson score method")
         st.dataframe(comparison_df, use_container_width=True, hide_index=True)
     else:
         st.info(f"This test has data from a single study ({test_data['study_ids']})")
@@ -703,6 +733,7 @@ def page_study_comparison(data):
 
     study_results = data['study_test_result']
     pooled = data['pooled_analysis']
+    test_registry = data['test_registry']
 
     # Get overlapping tests
     overlapping = pooled[pooled['n_studies'] > 1]['test_canonical'].tolist()
@@ -714,7 +745,10 @@ def page_study_comparison(data):
 
     comparison_data = []
     for test in overlapping:
-        test_results = study_results[study_results['test_name_original'].str.contains(test.split(' (')[0], case=False, na=False)]
+        test_id_rows = test_registry[test_registry['test_canonical'] == test]['test_id'].values
+        if len(test_id_rows) == 0:
+            continue
+        test_results = study_results[study_results['test_id'] == test_id_rows[0]]
 
         cub_data = test_results[test_results['study_id'] == 'CUB2024']
         pel_data = test_results[test_results['study_id'] == 'PEL2025']
@@ -1063,7 +1097,7 @@ def page_data_download(data):
     st.markdown("---")
     st.subheader("Download Complete Database")
 
-    # Create combined CSV
+    # Create combined Excel
     import io
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
