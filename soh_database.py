@@ -8,6 +8,7 @@ Data sources: Cubukcu 2024 (n=514, 195 tests) + Peltier 2025 (n=267, 20 analytes
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 
@@ -188,6 +189,72 @@ def calculate_all_cis(test_data, n_col='n_total'):
     cis['p_eq5']  = wilson_ci(p_eq5  / 100, n)
 
     return cis
+
+
+def compute_kappa(ratings_a, ratings_b, n_categories=5):
+    """
+    Compute Cohen's kappa (unweighted) and linear-weighted kappa between two
+    paired sequences of ordinal ratings (integers 1..n_categories).
+
+    SE formula: Cohen (1960) / McHugh (2012) — sqrt(Pr(a)*(1-Pr(a)) / (n*(1-Pr(e))^2))
+    Weighted kappa uses linear weights: w_ij = 1 - |i-j| / (k-1)
+    """
+    n = len(ratings_a)
+    if n == 0:
+        return None
+
+    k = n_categories
+    counts = np.zeros((k, k), dtype=int)
+    for a, b in zip(ratings_a, ratings_b):
+        i, j = int(a) - 1, int(b) - 1
+        if 0 <= i < k and 0 <= j < k:
+            counts[i, j] += 1
+
+    row_marg = counts.sum(axis=1)
+    col_marg = counts.sum(axis=0)
+
+    # Unweighted kappa
+    pr_a = counts.diagonal().sum() / n
+    pr_e = float(np.sum((row_marg / n) * (col_marg / n)))
+    kappa = (pr_a - pr_e) / (1 - pr_e) if pr_e < 1 else 1.0
+    se_k  = np.sqrt(pr_a * (1 - pr_a) / (n * (1 - pr_e) ** 2)) if (1 - pr_e) > 0 else 0.0
+    ci_k  = (kappa - 1.96 * se_k, kappa + 1.96 * se_k)
+
+    # Linear-weighted kappa
+    weights = np.array([[1 - abs(i - j) / (k - 1) for j in range(k)] for i in range(k)])
+    pr_wa = float(np.sum(weights * counts) / n)
+    pr_we = float(np.sum(weights * np.outer(row_marg / n, col_marg / n)))
+    kappa_w = (pr_wa - pr_we) / (1 - pr_we) if pr_we < 1 else 1.0
+    se_kw   = np.sqrt(pr_wa * (1 - pr_wa) / (n * (1 - pr_we) ** 2)) if (1 - pr_we) > 0 else 0.0
+    ci_kw   = (kappa_w - 1.96 * se_kw, kappa_w + 1.96 * se_kw)
+
+    return {
+        'n': n, 'counts': counts,
+        'row_marg': row_marg, 'col_marg': col_marg,
+        'pr_a': pr_a, 'pr_e': pr_e,
+        'kappa': kappa,   'se_kappa':   se_k,  'ci_kappa':   ci_k,
+        'pr_wa': pr_wa,   'pr_we': pr_we,
+        'kappa_w': kappa_w, 'se_kappa_w': se_kw, 'ci_kappa_w': ci_kw,
+    }
+
+
+def interpret_kappa(kappa):
+    """
+    Interpret a kappa value per McHugh (2012) Table 3.
+    Returns (level_label, hex_color, reliable_data_pct_range).
+    """
+    if kappa <= 0.20:
+        return "None",          "#c0392b", "0–4%"
+    elif kappa <= 0.39:
+        return "Minimal",       "#e67e22", "4–15%"
+    elif kappa <= 0.59:
+        return "Weak",          "#f39c12", "15–35%"
+    elif kappa <= 0.79:
+        return "Moderate",      "#27ae60", "35–63%"
+    elif kappa <= 0.90:
+        return "Strong",        "#1e8449", "64–81%"
+    else:
+        return "Almost Perfect","#148f77",  "82–100%"
 
 
 # ============================================================================
@@ -754,10 +821,33 @@ def page_study_comparison(data):
         pel_data = test_results[test_results['study_id'] == 'PEL2025']
 
         if len(cub_data) > 0 and len(pel_data) > 0:
+            cub_row = cub_data.iloc[0]
+            pel_row = pel_data.iloc[0]
+
+            def _modal(r):
+                return int(np.argmax([r[f'p{k}_pct'] for k in range(1, 6)])) + 1
+
+            def _median(r):
+                cumul = 0
+                for k in range(1, 6):
+                    cumul += r[f'p{k}_pct']
+                    if cumul >= 50:
+                        return k
+                return 5
+
+            def _mean_r(r):
+                return max(1, min(5, int(round(r['mean_SoH']))))
+
             comparison_data.append({
-                'Test': test,
-                'CUB2024': cub_data['mean_SoH'].values[0],
-                'PEL2025': pel_data['mean_SoH'].values[0]
+                'Test':       test,
+                'CUB2024':    cub_row['mean_SoH'],
+                'PEL2025':    pel_row['mean_SoH'],
+                'CUB_modal':  _modal(cub_row),
+                'PEL_modal':  _modal(pel_row),
+                'CUB_median': _median(cub_row),
+                'PEL_median': _median(pel_row),
+                'CUB_mean_r': _mean_r(cub_row),
+                'PEL_mean_r': _mean_r(pel_row),
             })
 
     if comparison_data:
@@ -857,6 +947,187 @@ def page_study_comparison(data):
                 f"r = {corr:.3f}",
                 help="Pearson correlation between study ratings"
             )
+
+        # ----------------------------------------------------------------
+        # KAPPA ANALYSIS
+        # ----------------------------------------------------------------
+        st.markdown("---")
+        st.subheader("Interrater Reliability: Cohen's Kappa")
+
+        # Rating-type selector
+        rating_choice = st.radio(
+            "Rating score used for kappa",
+            options=["Mean SoH (rounded)", "Median SoH", "Modal SoH"],
+            horizontal=True,
+            help=(
+                "Choose which per-study SoH score is treated as the categorical rating for each test.\n\n"
+                "**Mean (rounded):** continuous mean SoH rounded to the nearest integer (1–5).\n\n"
+                "**Median:** lowest category at which the cumulative distribution reaches ≥ 50%.\n\n"
+                "**Modal:** the most frequently assigned category (argmax of the distribution)."
+            )
+        )
+
+        rating_cfg = {
+            "Mean SoH (rounded)": {
+                "cub_col": "CUB_mean_r", "pel_col": "PEL_mean_r",
+                "label": "Mean (rounded)",
+                "cub_head": "CUB2024 Mean (rounded)",
+                "pel_head": "PEL2025 Mean (rounded)",
+                "desc": (
+                    "Mean SoH rounded to the nearest integer — retains the most distributional "
+                    "information but may differ from the actual category most raters selected."
+                ),
+            },
+            "Median SoH": {
+                "cub_col": "CUB_median", "pel_col": "PEL_median",
+                "label": "Median",
+                "cub_head": "CUB2024 Median",
+                "pel_head": "PEL2025 Median",
+                "desc": (
+                    "Median SoH — the lowest category at which the cumulative distribution "
+                    "first reaches or exceeds 50%. Robust to extreme ratings."
+                ),
+            },
+            "Modal SoH": {
+                "cub_col": "CUB_modal", "pel_col": "PEL_modal",
+                "label": "Modal",
+                "cub_head": "CUB2024 Modal",
+                "pel_head": "PEL2025 Modal",
+                "desc": (
+                    "Modal SoH — the most frequently assigned category (argmax of the "
+                    "distribution). The natural categorical summary for nominal kappa."
+                ),
+            },
+        }
+        cfg = rating_cfg[rating_choice]
+
+        st.markdown(f"""
+**What is measured here?**
+
+Each study is treated as an independent **rater** and each of the {len(comp_df)} shared tests as
+one **observation**. The **{cfg['label']} SoH score** ({cfg['desc']}) is used as that study's
+categorical rating for a given test. Linear-weighted Cohen's κ quantifies agreement *beyond what
+pure chance would predict*, giving partial credit for near-misses — appropriate for this ordinal
+1–5 scale (linear weights: w = 1 − |i−j| / 4).
+
+*Interpretation (McHugh, 2012 — Biochemia Medica):*
+κ ≤ 0.20 → **None** · 0.21–0.39 → **Minimal** · 0.40–0.59 → **Weak** · 0.60–0.79 → **Moderate** · 0.80–0.90 → **Strong** · >0.90 → **Almost Perfect**
+        """)
+
+        cub_ratings = comp_df[cfg['cub_col']].tolist()
+        pel_ratings = comp_df[cfg['pel_col']].tolist()
+        kr = compute_kappa(cub_ratings, pel_ratings)
+
+        if kr:
+            # ---- Top metrics row ----
+            m1, m2, m3 = st.columns(3)
+
+            with m1:
+                st.metric(
+                    "Observed Agreement",
+                    f"{kr['pr_wa'] * 100:.1f}%",
+                    help=(
+                        f"Pr_w(a): Weighted observed agreement across {kr['n']} tests "
+                        f"using linear weights (w = 1 − |i−j| / 4)."
+                    )
+                )
+            with m2:
+                st.metric(
+                    "Chance Agreement",
+                    f"{kr['pr_we'] * 100:.1f}%",
+                    help="Pr_w(e): Weighted agreement expected by chance given the marginal distributions."
+                )
+            with m3:
+                lo_kw, hi_kw = kr['ci_kappa_w']
+                st.metric(
+                    "Weighted κ (linear)",
+                    f"{kr['kappa_w']:.3f}",
+                    help=(
+                        f"95% CI: [{lo_kw:.3f}, {hi_kw:.3f}]\n\n"
+                        f"SE = {kr['se_kappa_w']:.3f} (Cohen / McHugh formula)\n\n"
+                        "Linear weights: w = 1 − |i−j| / 4. "
+                        "Near-misses count as partial agreement."
+                    )
+                )
+
+            # ---- Interpretation box ----
+            level_w, color_w, _ = interpret_kappa(kr['kappa_w'])
+
+            st.markdown(f"""
+<div style="padding:1rem; border-radius:8px; background:{color_w}22; border-left:5px solid {color_w}; margin:0.8rem 0;">
+  <strong>Weighted κ = {kr['kappa_w']:.3f}</strong><br>
+  Level of agreement: <strong style="color:{color_w}">{level_w}</strong>
+</div>
+            """, unsafe_allow_html=True)
+
+            # ---- Contingency table heatmap ----
+            st.markdown(f"#### Agreement Matrix ({cfg['label']} SoH Ratings)")
+            st.caption(
+                f"Rows = CUB2024 {cfg['label'].lower()} rating · "
+                f"Columns = PEL2025 {cfg['label'].lower()} rating · "
+                "Diagonal cells (outlined in red) = exact agreement"
+            )
+
+            cat_labels = ["1 Negligible", "2 Minor", "3 Serious", "4 Critical", "5 Catastrophic"]
+
+            fig_heat = go.Figure(go.Heatmap(
+                z=kr['counts'],
+                x=cat_labels,
+                y=cat_labels,
+                colorscale='Blues',
+                showscale=False,
+                text=kr['counts'],
+                texttemplate="%{text}",
+                textfont=dict(size=16),
+                hovertemplate="CUB2024: %{y}<br>PEL2025: %{x}<br>Tests: %{z}<extra></extra>"
+            ))
+
+            for i in range(5):
+                fig_heat.add_shape(
+                    type="rect",
+                    x0=i - 0.5, x1=i + 0.5,
+                    y0=i - 0.5, y1=i + 0.5,
+                    line=dict(color="#e74c3c", width=2),
+                )
+
+            fig_heat.update_layout(
+                xaxis_title="PEL2025 (Peltier 2025)",
+                yaxis_title="CUB2024 (Cubukcu 2024)",
+                height=380,
+                margin=dict(l=10, r=10, t=10, b=10),
+                yaxis=dict(autorange="reversed"),
+            )
+            st.plotly_chart(fig_heat, use_container_width=True)
+
+            # ---- Per-test agreement table ----
+            st.markdown(f"#### Per-Test {cfg['label']} Rating Agreement")
+
+            harm_labels = {1: "Negligible", 2: "Minor", 3: "Serious", 4: "Critical", 5: "Catastrophic"}
+            agree_rows = []
+            for _, row in comp_df.iterrows():
+                a = row[cfg['cub_col']]
+                b = row[cfg['pel_col']]
+                diff = abs(a - b)
+                agree_rows.append({
+                    'Test':               row['Test'],
+                    cfg['cub_head']:      f"{a} – {harm_labels[a]}",
+                    cfg['pel_head']:      f"{b} – {harm_labels[b]}",
+                    'Exact Match':        "Yes" if diff == 0 else "No",
+                    'Absolute Difference': int(diff),
+                })
+            agree_df = pd.DataFrame(agree_rows)
+            st.dataframe(agree_df, use_container_width=True, hide_index=True)
+
+            # ---- Methodological note ----
+            st.info(
+                f"**Methodological note — small sample caution:** With only n = {kr['n']} shared tests, "
+                f"the 95% CI is wide (weighted κ: [{lo_kw:.2f}–{hi_kw:.2f}]). "
+                f"Currently using **{cfg['label']}** SoH as the categorical rating. "
+                "CI uses the formula of Cohen (1960) / McHugh (2012, *Biochemia Medica*): "
+                "SE_κ = √[Pr_w(a)·(1−Pr_w(a)) / (n·(1−Pr_w(e))²)]. "
+                "Switch the selector above to compare kappa across the three rating approaches."
+            )
+
     else:
         st.warning("Could not find matching test data for comparison")
 
