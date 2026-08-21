@@ -1402,7 +1402,6 @@ def main():
 
     # Sidebar navigation
     st.sidebar.image('./images/eflm_logo.png')
-    st.sidebar.image("https://img.icons8.com/fluency/96/test-tube.png", width=80)
     st.sidebar.title("SoH Evidence Database")
     st.sidebar.markdown("---")
 
