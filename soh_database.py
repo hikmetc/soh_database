@@ -1437,7 +1437,7 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.markdown("""
     <small>
-    **Database v1.1**<br>
+    **Database v1.2**<br>
     Based on SoH Ordinal Meta-Method v1.0<br>
     <br>
     Studies: Cubukcu 2024, Peltier 2025<br>
